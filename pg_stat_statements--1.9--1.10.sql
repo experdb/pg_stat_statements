@@ -55,7 +55,9 @@ CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT jit_optimization_count int8,
     OUT jit_optimization_time float8,
     OUT jit_emission_count int8,
-    OUT jit_emission_time float8
+    OUT jit_emission_time float8,
+    OUT stats_last timestamp with time zone,
+    OUT stats_since timestamp with time zone
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stat_statements_1_10'

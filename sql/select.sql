@@ -5,7 +5,7 @@
 CREATE EXTENSION pg_stat_statements;
 SET pg_stat_statements.track_utility = FALSE;
 SET pg_stat_statements.track_planning = TRUE;
-SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+SELECT pg_stat_statements_reset();
 
 --
 -- simple and compound statements
@@ -56,7 +56,15 @@ EXECUTE pgss_test(1);
 DEALLOCATE pgss_test;
 
 SELECT calls, rows, query FROM pg_stat_statements ORDER BY query COLLATE "C";
+SELECT pg_stat_statements_reset();
+
+-- normalization of constants and parameters, with constant locations
+-- recorded one or more times.
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+SELECT WHERE '1' IN ('1'::int, '3'::int::text);
+SELECT WHERE (1, 2) IN ((1, 2), (2, 3));
+SELECT WHERE (3, 4) IN ((5, 6), (8, 7));
+SELECT query, calls FROM pg_stat_statements ORDER BY query COLLATE "C";
 
 --
 -- queries with locking clauses
@@ -64,7 +72,7 @@ SELECT pg_stat_statements_reset() IS NOT NULL AS t;
 CREATE TABLE pgss_a (id integer PRIMARY KEY);
 CREATE TABLE pgss_b (id integer PRIMARY KEY, a_id integer REFERENCES pgss_a);
 
-SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+SELECT pg_stat_statements_reset();
 
 -- control query
 SELECT * FROM pgss_a JOIN pgss_b ON pgss_b.a_id = pgss_a.id;
@@ -92,7 +100,7 @@ DROP TABLE pgss_a, pgss_b CASCADE;
 --
 -- access to pg_stat_statements_info view
 --
-SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+SELECT pg_stat_statements_reset();
 SELECT dealloc FROM pg_stat_statements_info;
 
 -- FROM [ONLY]
@@ -146,4 +154,4 @@ SELECT (
 ) FROM (VALUES(6,7)) v3(e,f) GROUP BY ROLLUP(e,f);
 
 SELECT COUNT(*) FROM pg_stat_statements WHERE query LIKE '%SELECT GROUPING%';
-SELECT pg_stat_statements_reset() IS NOT NULL AS t;
+SELECT pg_stat_statements_reset();
