@@ -1,12 +1,15 @@
-/* contrib/pg_stat_statements/pg_stat_statements--1.10--1.11.sql */
+/* contrib/pg_stat_statements/pg_stat_statements--1.12--1.12e1.sql */
 
 -- complain if script is sourced in psql, rather than via ALTER EXTENSION
-\echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.11'" to load this file. \quit
+\echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.12e1'" to load this file. \quit
 
-/* Drop old versions */
-DROP VIEW pg_stat_statements;
+/* First we have to remove them from the extension */
+ALTER EXTENSION pg_stat_statements DROP VIEW pg_stat_statements;
+ALTER EXTENSION pg_stat_statements DROP FUNCTION pg_stat_statements(boolean);
+
+/* Then we can drop them */
+DROP VIEW pg_stat_statements CASCADE;
 DROP FUNCTION pg_stat_statements(boolean);
-DROP FUNCTION pg_stat_statements_reset(Oid, Oid, bigint);
 
 /* Now redefine */
 CREATE FUNCTION pg_stat_statements(IN showtext boolean,
@@ -47,6 +50,7 @@ CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT wal_records int8,
     OUT wal_fpi int8,
     OUT wal_bytes numeric,
+    OUT wal_buffers_full int8,
     OUT jit_functions int8,
     OUT jit_generation_time float8,
     OUT jit_inlining_count int8,
@@ -57,26 +61,17 @@ CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT jit_emission_time float8,
     OUT jit_deform_count int8,
     OUT jit_deform_time float8,
+    OUT parallel_workers_to_launch int8,
+    OUT parallel_workers_launched int8,
     OUT stats_since timestamp with time zone,
-    OUT minmax_stats_since timestamp with time zone
+    OUT minmax_stats_since timestamp with time zone,
+    OUT stats_last timestamp with time zone
 )
 RETURNS SETOF record
-AS 'MODULE_PATHNAME', 'pg_stat_statements_1_11'
+AS 'MODULE_PATHNAME', 'pg_stat_statements_1_12'
 LANGUAGE C STRICT VOLATILE PARALLEL SAFE;
 
 CREATE VIEW pg_stat_statements AS
   SELECT * FROM pg_stat_statements(true);
 
 GRANT SELECT ON pg_stat_statements TO PUBLIC;
-
-CREATE FUNCTION pg_stat_statements_reset(IN userid Oid DEFAULT 0,
-	IN dbid Oid DEFAULT 0,
-	IN queryid bigint DEFAULT 0,
-	IN minmax_only boolean DEFAULT false
-)
-RETURNS timestamp with time zone
-AS 'MODULE_PATHNAME', 'pg_stat_statements_reset_1_11'
-LANGUAGE C STRICT PARALLEL SAFE;
-
--- Don't want this to be available to non-superusers.
-REVOKE ALL ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint, boolean) FROM PUBLIC;
