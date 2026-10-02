@@ -119,7 +119,8 @@ typedef enum pgssVersion
 	PGSS_V1_9,
 	PGSS_V1_10,
 	PGSS_V1_11,
-	PGSS_V1_11E2,				/* eXperDB: 1.11 + stats_last + bind_types(NULL) */
+	PGSS_V1_11E2,				/* eXperDB: 1.11 + stats_last */
+	PGSS_V1_11E1,				/* eXperDB: legacy 1.11e1 SQL definition */
 } pgssVersion;
 
 typedef enum pgssStoreKind
@@ -1557,7 +1558,8 @@ pg_stat_statements_reset(PG_FUNCTION_ARGS)
 #define PG_STAT_STATEMENTS_COLS_V1_9	33
 #define PG_STAT_STATEMENTS_COLS_V1_10	43
 #define PG_STAT_STATEMENTS_COLS_V1_11	49
-#define PG_STAT_STATEMENTS_COLS_V1_11E2	51	/* eXperDB: 1.11 + stats_last + bind_types */
+#define PG_STAT_STATEMENTS_COLS_V1_11E2	50	/* eXperDB: 1.11 + stats_last */
+#define PG_STAT_STATEMENTS_COLS_V1_11E1	51	/* eXperDB: legacy 1.11e1 (+ bind_types) */
 #define PG_STAT_STATEMENTS_COLS			51	/* maximum of above */
 
 /*
@@ -1580,7 +1582,7 @@ pg_stat_statements_1_11(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
-/* eXperDB 1.11e2: the 1.11 column set plus stats_last and bind_types (always NULL) */
+/* eXperDB 1.11e2: the 1.11 column set plus stats_last */
 Datum
 pg_stat_statements_1_11e2(PG_FUNCTION_ARGS)
 {
@@ -1726,14 +1728,19 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 				elog(ERROR, "incorrect number of output arguments");
 			break;
 		case PG_STAT_STATEMENTS_COLS_V1_11E2:
-			/*
-			 * eXperDB: the 1.11e1 SQL definition has the same 51 columns but is
-			 * bound to pg_stat_statements_1_11.  Serve it with the 1.11e2 layout so
-			 * the view keeps working between the library upgrade and ALTER EXTENSION.
-			 */
-			if (api_version != PGSS_V1_11 && api_version != PGSS_V1_11E2)
+			if (api_version != PGSS_V1_11E2)
 				elog(ERROR, "incorrect number of output arguments");
-			api_version = PGSS_V1_11E2;
+			break;
+		case PG_STAT_STATEMENTS_COLS_V1_11E1:
+			/*
+			 * eXperDB: the legacy 1.11e1 SQL definition (51 columns, ending in
+			 * bind_types) is bound to pg_stat_statements_1_11.  Keep serving it,
+			 * with bind_types NULL, so the view works between the library upgrade
+			 * and ALTER EXTENSION ... UPDATE TO '1.11e2'.
+			 */
+			if (api_version != PGSS_V1_11)
+				elog(ERROR, "incorrect number of output arguments");
+			api_version = PGSS_V1_11E1;
 			break;
 		default:
 			elog(ERROR, "incorrect number of output arguments");
@@ -1992,7 +1999,10 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 				values[i++] = TimestampTzGetDatum(stats_last);
 			else
 				nulls[i++] = true;
-			/* eXperDB: bind_types kept only for 1.11e1 compatibility, always NULL */
+		}
+		if (api_version == PGSS_V1_11E1)
+		{
+			/* eXperDB: legacy 1.11e1 definition only; bind_types is not computed */
 			nulls[i++] = true;
 		}
 
@@ -2005,6 +2015,7 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 					 api_version == PGSS_V1_10 ? PG_STAT_STATEMENTS_COLS_V1_10 :
 					 api_version == PGSS_V1_11 ? PG_STAT_STATEMENTS_COLS_V1_11 :
 					 api_version == PGSS_V1_11E2 ? PG_STAT_STATEMENTS_COLS_V1_11E2 :
+					 api_version == PGSS_V1_11E1 ? PG_STAT_STATEMENTS_COLS_V1_11E1 :
 					 -1 /* fail if you forget to update this assert */ ));
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
