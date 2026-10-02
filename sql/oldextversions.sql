@@ -58,4 +58,12 @@ SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
 SELECT pg_get_functiondef('pg_stat_statements_reset'::regproc);
 SELECT pg_stat_statements_reset() IS NOT NULL AS t;
 
+-- eXperDB 1.11e2: stats_last column appended to pg_stat_statements
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.11e2';
+\d pg_stat_statements
+SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
+-- stats_last is set once the counters have been updated and never precedes stats_since
+SELECT count(*) > 0 AS has_stats_last FROM pg_stat_statements
+  WHERE stats_last IS NOT NULL AND stats_last >= stats_since;
+
 DROP EXTENSION pg_stat_statements;

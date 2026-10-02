@@ -21,10 +21,11 @@
  *
  * Note about locking issues: to create or delete an entry in the shared
  * hashtable, one must hold pgss->lock exclusively.  Modifying any field
- * in an entry except the counters requires the same.  To look up an entry,
- * one must hold the lock shared.  To read or update the counters within
- * an entry, one must hold the lock shared or exclusive (so the entry doesn't
- * disappear!) and also take the entry's mutex spinlock.
+ * in an entry except the counters (and stats_last, eXperDB) requires the
+ * same.  To look up an entry, one must hold the lock shared.  To read or
+ * update the counters or stats_last within an entry, one must hold the lock
+ * shared or exclusive (so the entry doesn't disappear!) and also take the
+ * entry's mutex spinlock.
  * The shared state variable pgss->extent (the next free spot in the external
  * query-text file) should be accessed only while holding either the
  * pgss->mutex spinlock, or exclusive lock on pgss->lock.  We use the mutex to
@@ -85,7 +86,12 @@ PG_MODULE_MAGIC;
 #define PGSS_TEXT_FILE	PG_STAT_TMP_DIR "/pgss_query_texts.stat"
 
 /* Magic number identifying the stats file format */
-static const uint32 PGSS_FILE_HEADER = 0x20220408;
+/*
+ * eXperDB 1.11e2: pgssEntry carries an extra stats_last field, so the
+ * on-disk layout differs from upstream 1.11 (0x20220408) and from 1.11e1.
+ * A distinct header makes pgss_shmem_startup() discard those files.
+ */
+static const uint32 PGSS_FILE_HEADER = 0x20251002;
 
 /* PostgreSQL major version number, changes in which invalidate all entries */
 static const uint32 PGSS_PG_MAJOR_VERSION = PG_VERSION_NUM / 100;
@@ -99,7 +105,6 @@ static const uint32 PGSS_PG_MAJOR_VERSION = PG_VERSION_NUM / 100;
 #define STICKY_DECREASE_FACTOR	(0.50)	/* factor for sticky entries */
 #define USAGE_DEALLOC_PERCENT	5	/* free this % of entries at once */
 #define IS_STICKY(c)	((c.calls[PGSS_PLAN] + c.calls[PGSS_EXEC]) == 0)
-#define NUMVAR 512
 
 /*
  * Extension version number, for supporting older extension versions' objects
@@ -114,6 +119,7 @@ typedef enum pgssVersion
 	PGSS_V1_9,
 	PGSS_V1_10,
 	PGSS_V1_11,
+	PGSS_V1_11E2,				/* eXperDB: 1.11 + stats_last */
 } pgssVersion;
 
 typedef enum pgssStoreKind
@@ -229,13 +235,11 @@ typedef struct pgssEntry
 	Counters	counters;		/* the statistics for this query */
 	Size		query_offset;	/* query text offset in external file */
 	int			query_len;		/* # of valid bytes in query string, or -1 */
-	int			bind_types_len; /* length of bind types bitstring */
-	char		bind_types[NUMVAR]; /* bind types as 0/1 string */
 	int			encoding;		/* query text encoding */
 	TimestampTz stats_since;	/* timestamp of entry allocation */
 	TimestampTz minmax_stats_since; /* timestamp of last min/max values reset */
-	TimestampTz stats_last;	/* timestamp of entry allocation add by robin 20250321 */
-	slock_t		mutex;			/* protects the counters only */
+	TimestampTz stats_last;		/* eXperDB: timestamp of last counters update */
+	slock_t		mutex;			/* protects the counters and stats_last */
 } pgssEntry;
 
 /*
@@ -322,6 +326,7 @@ PG_FUNCTION_INFO_V1(pg_stat_statements_1_8);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_9);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_10);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_11);
+PG_FUNCTION_INFO_V1(pg_stat_statements_1_11e2);
 PG_FUNCTION_INFO_V1(pg_stat_statements);
 PG_FUNCTION_INFO_V1(pg_stat_statements_info);
 
@@ -369,8 +374,7 @@ static bool need_gc_qtexts(void);
 static void gc_qtexts(void);
 static TimestampTz entry_reset(Oid userid, Oid dbid, uint64 queryid, bool minmax_only);
 static char *generate_normalized_query(JumbleState *jstate, const char *query,
-                                       int query_loc, int *query_len_p,
-                                       char **bind_types_p, int *bind_types_len_p);
+									   int query_loc, int *query_len_p);
 static void fill_in_constant_lengths(JumbleState *jstate, const char *query,
 									 int query_loc);
 static int	comp_location(const void *a, const void *b);
@@ -665,6 +669,7 @@ pgss_shmem_startup(void)
 		entry->counters = temp.counters;
 		entry->stats_since = temp.stats_since;
 		entry->minmax_stats_since = temp.minmax_stats_since;
+		entry->stats_last = temp.stats_last;
 	}
 
 	/* Read global statistics for pg_stat_statements */
@@ -1099,8 +1104,8 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 static void
 pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					bool readOnlyTree,
-					ProcessUtilityContext context, ParamListInfo params,
-					QueryEnvironment *queryEnv,
+					ProcessUtilityContext context,
+					ParamListInfo params, QueryEnvironment *queryEnv,
 					DestReceiver *dest, QueryCompletion *qc)
 {
 	Node	   *parsetree = pstmt->utilityStmt;
@@ -1281,8 +1286,6 @@ pgss_store(const char *query, uint64 queryId,
 	pgssHashKey key;
 	pgssEntry  *entry;
 	char	   *norm_query = NULL;
-	char	   *bind_types = NULL;
-	int			bind_types_len = 0;
 	int			encoding = GetDatabaseEncoding();
 
 	Assert(query != NULL);
@@ -1340,9 +1343,7 @@ pgss_store(const char *query, uint64 queryId,
 			LWLockRelease(pgss->lock);
 			norm_query = generate_normalized_query(jstate, query,
 												   query_location,
-												   &query_len,
-												   &bind_types,
-												   &bind_types_len);
+												   &query_len);
 			LWLockAcquire(pgss->lock, LW_SHARED);
 		}
 
@@ -1383,16 +1384,6 @@ pgss_store(const char *query, uint64 queryId,
 		/* If needed, perform garbage collection while exclusive lock held */
 		if (do_gc)
 			gc_qtexts();
-
-		/* store bind types into entry if available */
-		if (jstate && bind_types)
-		{
-			int copy_len = Min(bind_types_len, (int)sizeof(entry->bind_types) - 1);
-			memcpy(entry->bind_types, bind_types, copy_len);
-			entry->bind_types[copy_len] = '\0';
-			entry->bind_types_len = copy_len;
-			pfree(bind_types);
-		}
 	}
 
 	/* Increment the counts, except when jstate is not NULL */
@@ -1403,6 +1394,8 @@ pgss_store(const char *query, uint64 queryId,
 		 * locking rules at the head of the file)
 		 */
 		volatile pgssEntry *e = (volatile pgssEntry *) entry;
+		/* eXperDB: take the timestamp before entering the spinlock */
+		TimestampTz stats_last = GetCurrentTimestamp();
 
 		Assert(kind == PGSS_PLAN || kind == PGSS_EXEC);
 
@@ -1473,7 +1466,9 @@ pgss_store(const char *query, uint64 queryId,
 		e->counters.wal_records += walusage->wal_records;
 		e->counters.wal_fpi += walusage->wal_fpi;
 		e->counters.wal_bytes += walusage->wal_bytes;
-		e->stats_last = GetCurrentTimestamp(); //updating timestamp by robin 20250321
+		/* eXperDB: keep stats_last monotonic under concurrent updates */
+		if (stats_last > e->stats_last)
+			e->stats_last = stats_last;
 		if (jitusage)
 		{
 			e->counters.jit_functions += jitusage->created_functions;
@@ -1561,10 +1556,9 @@ pg_stat_statements_reset(PG_FUNCTION_ARGS)
 #define PG_STAT_STATEMENTS_COLS_V1_8	32
 #define PG_STAT_STATEMENTS_COLS_V1_9	33
 #define PG_STAT_STATEMENTS_COLS_V1_10	43
-//#define PG_STAT_STATEMENTS_COLS_V1_11	49
-//#define PG_STAT_STATEMENTS_COLS			49	/* maximum of above */
-#define PG_STAT_STATEMENTS_COLS_V1_11	51
-#define PG_STAT_STATEMENTS_COLS			51	/* maximum of above increase cols for added col stats last by robin 20250321*/  
+#define PG_STAT_STATEMENTS_COLS_V1_11	49
+#define PG_STAT_STATEMENTS_COLS_V1_11E2	50	/* eXperDB: 1.11 + stats_last */
+#define PG_STAT_STATEMENTS_COLS			50	/* maximum of above */
 
 /*
  * Retrieve statement statistics.
@@ -1582,6 +1576,17 @@ pg_stat_statements_1_11(PG_FUNCTION_ARGS)
 	bool		showtext = PG_GETARG_BOOL(0);
 
 	pg_stat_statements_internal(fcinfo, PGSS_V1_11, showtext);
+
+	return (Datum) 0;
+}
+
+/* eXperDB 1.11e2: the 1.11 column set plus stats_last */
+Datum
+pg_stat_statements_1_11e2(PG_FUNCTION_ARGS)
+{
+	bool		showtext = PG_GETARG_BOOL(0);
+
+	pg_stat_statements_internal(fcinfo, PGSS_V1_11E2, showtext);
 
 	return (Datum) 0;
 }
@@ -1720,6 +1725,10 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 			if (api_version != PGSS_V1_11)
 				elog(ERROR, "incorrect number of output arguments");
 			break;
+		case PG_STAT_STATEMENTS_COLS_V1_11E2:
+			if (api_version != PGSS_V1_11E2)
+				elog(ERROR, "incorrect number of output arguments");
+			break;
 		default:
 			elog(ERROR, "incorrect number of output arguments");
 	}
@@ -1799,7 +1808,7 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 		int64		queryid = entry->key.queryid;
 		TimestampTz stats_since;
 		TimestampTz minmax_stats_since;
-		TimestampTz stats_last; //add by robin 20250321
+		TimestampTz stats_last;
 
 		memset(values, 0, sizeof(values));
 		memset(nulls, 0, sizeof(nulls));
@@ -1969,21 +1978,14 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 			values[i++] = Float8GetDatumFast(tmp.jit_deform_time);
 			values[i++] = TimestampTzGetDatum(stats_since);
 			values[i++] = TimestampTzGetDatum(minmax_stats_since);
-			values[i++] = TimestampTzGetDatum(stats_last);  //add by robin 20250321
-		/* bind_types column as text */
-		{
-			text *bt = NULL;
-			int btlen = entry->bind_types_len;
-			if (btlen > 0)
-			{
-				bt = cstring_to_text_with_len(entry->bind_types, btlen);
-				values[i++] = PointerGetDatum(bt);
-			}
-			else
-			{
-				nulls[i++] = true;
-			}
 		}
+		if (api_version >= PGSS_V1_11E2)
+		{
+			/* eXperDB: NULL until the counters have been updated once */
+			if (stats_last != 0)
+				values[i++] = TimestampTzGetDatum(stats_last);
+			else
+				nulls[i++] = true;
 		}
 
 		Assert(i == (api_version == PGSS_V1_0 ? PG_STAT_STATEMENTS_COLS_V1_0 :
@@ -1994,6 +1996,7 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 					 api_version == PGSS_V1_9 ? PG_STAT_STATEMENTS_COLS_V1_9 :
 					 api_version == PGSS_V1_10 ? PG_STAT_STATEMENTS_COLS_V1_10 :
 					 api_version == PGSS_V1_11 ? PG_STAT_STATEMENTS_COLS_V1_11 :
+					 api_version == PGSS_V1_11E2 ? PG_STAT_STATEMENTS_COLS_V1_11E2 :
 					 -1 /* fail if you forget to update this assert */ ));
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
@@ -2101,11 +2104,10 @@ entry_alloc(pgssHashKey *key, Size query_offset, int query_len, int encoding,
 		Assert(query_len >= 0);
 		entry->query_offset = query_offset;
 		entry->query_len = query_len;
-		entry->bind_types_len = 0;
-		entry->bind_types[0] = '\0';
 		entry->encoding = encoding;
 		entry->stats_since = GetCurrentTimestamp();
 		entry->minmax_stats_since = entry->stats_since;
+		entry->stats_last = 0;	/* eXperDB: no counters update yet */
 	}
 
 	return entry;
@@ -2831,26 +2833,17 @@ release_lock:
  */
 static char *
 generate_normalized_query(JumbleState *jstate, const char *query,
-                         int query_loc, int *query_len_p,
-                         char **bind_types_p, int *bind_types_len_p)
+						  int query_loc, int *query_len_p)
 {
-	char       *norm_query;
-	int         query_len = *query_len_p;
-	int         i,
-				norm_query_buflen,  /* Space allowed for norm_query */
-				len_to_wrt,     /* Length (in bytes) to write */
-				quer_loc = 0,   /* Source query byte location */
+	char	   *norm_query;
+	int			query_len = *query_len_p;
+	int			i,
+				norm_query_buflen,	/* Space allowed for norm_query */
+				len_to_wrt,		/* Length (in bytes) to write */
+				quer_loc = 0,	/* Source query byte location */
 				n_quer_loc = 0, /* Normalized query byte location */
-				last_off = 0,   /* Offset from start for previous tok */
-				last_tok_len = 0;   /* Length (in bytes) of that tok */
-
-    /* initialize bind types outputs */
-    if (bind_types_p){
-        *bind_types_p = NULL;
-	}
-    if (bind_types_len_p){
-        *bind_types_len_p = 0;
-	}
+				last_off = 0,	/* Offset from start for previous tok */
+				last_tok_len = 0;	/* Length (in bytes) of that tok */
 
 	/*
 	 * Get constants' lengths (core system only gives us locations).  Note
@@ -2858,29 +2851,6 @@ generate_normalized_query(JumbleState *jstate, const char *query,
 	 */
 	fill_in_constant_lengths(jstate, query, query_loc);
 
-	/* Allocate bind types buffer if requested (before the loop) */
-	if (bind_types_p && jstate->clocations_count > 0)
-	{
-		int max_bind_types = Min(jstate->clocations_count, NUMVAR);
-		volatile char *bt = NULL;
-
-		PG_TRY();
-		{
-			bt = palloc(max_bind_types+1);
-			memset((char *)bt, '0', max_bind_types);
-			bt[max_bind_types] = '\0';
-			*bind_types_p = (char *)bt;
-			if (bind_types_len_p)
-				*bind_types_len_p = max_bind_types;
-		}
-		PG_CATCH();
-		{
-			if (bt)
-            pfree((void *)bt); /* free memory on exception, then rethrow */
-        	PG_RE_THROW(); /* release memory if an exception occurs, then rethrow */
-		}
-		PG_END_TRY();
-	}
 	/*
 	 * Allow for $n symbols to be longer than the constants they replace.
 	 * Constants must take at least one byte in text form, while a $n symbol
@@ -2897,7 +2867,7 @@ generate_normalized_query(JumbleState *jstate, const char *query,
 	{
 		int			off,		/* Offset from start for cur tok */
 					tok_len;	/* Length (in bytes) of that tok */
-		
+
 		off = jstate->clocations[i].location;
 		/* Adjust recorded location if we're dealing with partial string */
 		off -= query_loc;
@@ -2915,69 +2885,6 @@ generate_normalized_query(JumbleState *jstate, const char *query,
 		memcpy(norm_query + n_quer_loc, query + quer_loc, len_to_wrt);
 		n_quer_loc += len_to_wrt;
 
-		/* Determine bind type (number->0, string->1) */
-		if (bind_types_p && *bind_types_p)
-		{
-			const char *t   = query + off;
-			int         len = tok_len;
-			bool        is_number = true;
-			bool        seen_dot  = false;
-			const char *p;
-			const char *end;
-			unsigned char ch;
-
-			/* quoted literal: always string */
-			if (len >= 2 && t[0] == '\'' && t[len - 1] == '\'')
-			{
-				is_number = false;
-			}
-			else
-			{
-				/* optional leading minus */
-				if (len > 0 && *t == '-')
-				{
-					t++;
-					len--;
-				}
-
-				/* token becomes empty after '-' -> not a number (e.g. "-") */
-				if (len == 0)
-				{
-					is_number = false;
-				}
-				else
-				{
-					p   = t;
-					end = t + len;
-
-					for (; p < end; p++)
-					{
-						ch = (unsigned char)(*p);
-
-						if (ch == '.')
-						{
-							if (seen_dot)
-							{
-								is_number = false;
-								break;
-							}
-							seen_dot = true;
-							continue;
-						}
-
-						/* digit test: (unsigned)(ch - '0') <= 9 is faster */
-						if ((unsigned)(ch - '0') > 9)
-						{
-							is_number = false;
-							break;
-						}
-					}
-				}
-			}
-
-			(*bind_types_p)[i] = is_number ? '0' : '1';
-		}
-		
 		/* And insert a param symbol in place of the constant token */
 		n_quer_loc += sprintf(norm_query + n_quer_loc, "$%d",
 							  i + 1 + jstate->highest_extern_param_id);

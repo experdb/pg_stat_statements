@@ -1,14 +1,13 @@
-/* contrib/pg_stat_statements/pg_stat_statements--1.10--1.11.sql */
+/* contrib/pg_stat_statements/pg_stat_statements--1.11e1--1.11e2.sql */
 
 -- complain if script is sourced in psql, rather than via ALTER EXTENSION
-\echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.11e1'" to load this file. \quit
+\echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.11e2'" to load this file. \quit
 
-/* Drop old versions */
+/* Drop the 1.11e1 definitions (pg_stat_statements_reset is unchanged) */
 DROP VIEW pg_stat_statements;
 DROP FUNCTION pg_stat_statements(boolean);
-DROP FUNCTION pg_stat_statements_reset(Oid, Oid, bigint);
 
-/* Now redefine */
+/* Now redefine: upstream 1.11 columns + stats_last (eXperDB) */
 CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT userid oid,
     OUT dbid oid,
@@ -59,26 +58,13 @@ CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT jit_deform_time float8,
     OUT stats_since timestamp with time zone,
     OUT minmax_stats_since timestamp with time zone,
-    OUT stats_last timestamp with time zone,
-    OUT bind_types text    
+    OUT stats_last timestamp with time zone
 )
 RETURNS SETOF record
-AS 'MODULE_PATHNAME', 'pg_stat_statements_1_11'
+AS 'MODULE_PATHNAME', 'pg_stat_statements_1_11e2'
 LANGUAGE C STRICT VOLATILE PARALLEL SAFE;
 
 CREATE VIEW pg_stat_statements AS
   SELECT * FROM pg_stat_statements(true);
 
 GRANT SELECT ON pg_stat_statements TO PUBLIC;
-
-CREATE FUNCTION pg_stat_statements_reset(IN userid Oid DEFAULT 0,
-    IN dbid Oid DEFAULT 0,
-    IN queryid bigint DEFAULT 0,
-    IN minmax_only boolean DEFAULT false
-)
-RETURNS timestamp with time zone
-AS 'MODULE_PATHNAME', 'pg_stat_statements_reset_1_11'
-LANGUAGE C STRICT PARALLEL SAFE;
-
--- Don't want this to be available to non-superusers.
-REVOKE ALL ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint, boolean) FROM PUBLIC;
