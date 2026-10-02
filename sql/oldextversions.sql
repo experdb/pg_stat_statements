@@ -65,5 +65,12 @@ SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
 -- stats_last is set once the counters have been updated and never precedes stats_since
 SELECT count(*) > 0 AS has_stats_last FROM pg_stat_statements
   WHERE stats_last IS NOT NULL AND stats_last >= stats_since;
+-- bind_types is kept for 1.11e1 compatibility only and is always NULL
+SELECT count(bind_types) = 0 AS bind_types_null FROM pg_stat_statements;
+-- eXperDB: 1.11e2 <-> 1.11e1 only switch the C entry point (same row type)
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.11e1';
+SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.11e2';
+SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
 
 DROP EXTENSION pg_stat_statements;

@@ -1,13 +1,13 @@
-/* contrib/pg_stat_statements/pg_stat_statements--1.11e1--1.11e2.sql */
+/* contrib/pg_stat_statements/pg_stat_statements--1.11e2--1.11e1.sql */
 
 -- complain if script is sourced in psql, rather than via ALTER EXTENSION
-\echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.11e2'" to load this file. \quit
+\echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.11e1'" to load this file. \quit
 
 /*
- * eXperDB: 1.11e2 keeps the 1.11e1 row type (51 columns; bind_types is now
- * always NULL), so only the C entry point is switched.  The view and any
- * object depending on its row type (e.g. functions RETURNS SETOF
- * pg_stat_statements) are left untouched.
+ * eXperDB: rollback from 1.11e2 to 1.11e1.  The row type is the same, so
+ * only the C entry point is switched back to pg_stat_statements_1_11.
+ * Run it while the 1.11e2 library is still loaded, then reinstall the
+ * 1.11e1 library and restart.
  */
 CREATE OR REPLACE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT userid oid,
@@ -63,5 +63,5 @@ CREATE OR REPLACE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT bind_types text
 )
 RETURNS SETOF record
-AS 'MODULE_PATHNAME', 'pg_stat_statements_1_11e2'
+AS 'MODULE_PATHNAME', 'pg_stat_statements_1_11'
 LANGUAGE C STRICT VOLATILE PARALLEL SAFE;

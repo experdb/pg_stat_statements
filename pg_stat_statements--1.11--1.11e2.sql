@@ -7,7 +7,7 @@
 DROP VIEW pg_stat_statements;
 DROP FUNCTION pg_stat_statements(boolean);
 
-/* Now redefine: upstream 1.11 columns + stats_last (eXperDB) */
+/* Now redefine: upstream 1.11 columns + stats_last + bind_types (eXperDB, same row type as 1.11e1) */
 CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT userid oid,
     OUT dbid oid,
@@ -58,7 +58,8 @@ CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT jit_deform_time float8,
     OUT stats_since timestamp with time zone,
     OUT minmax_stats_since timestamp with time zone,
-    OUT stats_last timestamp with time zone
+    OUT stats_last timestamp with time zone,
+    OUT bind_types text
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stat_statements_1_11e2'

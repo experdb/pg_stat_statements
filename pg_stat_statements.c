@@ -119,7 +119,7 @@ typedef enum pgssVersion
 	PGSS_V1_9,
 	PGSS_V1_10,
 	PGSS_V1_11,
-	PGSS_V1_11E2,				/* eXperDB: 1.11 + stats_last */
+	PGSS_V1_11E2,				/* eXperDB: 1.11 + stats_last + bind_types(NULL) */
 } pgssVersion;
 
 typedef enum pgssStoreKind
@@ -1557,8 +1557,8 @@ pg_stat_statements_reset(PG_FUNCTION_ARGS)
 #define PG_STAT_STATEMENTS_COLS_V1_9	33
 #define PG_STAT_STATEMENTS_COLS_V1_10	43
 #define PG_STAT_STATEMENTS_COLS_V1_11	49
-#define PG_STAT_STATEMENTS_COLS_V1_11E2	50	/* eXperDB: 1.11 + stats_last */
-#define PG_STAT_STATEMENTS_COLS			50	/* maximum of above */
+#define PG_STAT_STATEMENTS_COLS_V1_11E2	51	/* eXperDB: 1.11 + stats_last + bind_types */
+#define PG_STAT_STATEMENTS_COLS			51	/* maximum of above */
 
 /*
  * Retrieve statement statistics.
@@ -1580,7 +1580,7 @@ pg_stat_statements_1_11(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
-/* eXperDB 1.11e2: the 1.11 column set plus stats_last */
+/* eXperDB 1.11e2: the 1.11 column set plus stats_last and bind_types (always NULL) */
 Datum
 pg_stat_statements_1_11e2(PG_FUNCTION_ARGS)
 {
@@ -1726,8 +1726,14 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 				elog(ERROR, "incorrect number of output arguments");
 			break;
 		case PG_STAT_STATEMENTS_COLS_V1_11E2:
-			if (api_version != PGSS_V1_11E2)
+			/*
+			 * eXperDB: the 1.11e1 SQL definition has the same 51 columns but is
+			 * bound to pg_stat_statements_1_11.  Serve it with the 1.11e2 layout so
+			 * the view keeps working between the library upgrade and ALTER EXTENSION.
+			 */
+			if (api_version != PGSS_V1_11 && api_version != PGSS_V1_11E2)
 				elog(ERROR, "incorrect number of output arguments");
+			api_version = PGSS_V1_11E2;
 			break;
 		default:
 			elog(ERROR, "incorrect number of output arguments");
@@ -1986,6 +1992,8 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 				values[i++] = TimestampTzGetDatum(stats_last);
 			else
 				nulls[i++] = true;
+			/* eXperDB: bind_types kept only for 1.11e1 compatibility, always NULL */
+			nulls[i++] = true;
 		}
 
 		Assert(i == (api_version == PGSS_V1_0 ? PG_STAT_STATEMENTS_COLS_V1_0 :

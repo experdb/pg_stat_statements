@@ -1,5 +1,5 @@
 # pg_stat_statements extension
-comment = 'track planning and execution statistics of all SQL statements executed (eXperDB 1.11e2: +stats_last)'
+comment = 'track planning and execution statistics of all SQL statements executed (eXperDB 1.11e2: +stats_last, bind_types=NULL)'
 default_version = '1.11e2'
 module_pathname = '$libdir/pg_stat_statements'
 relocatable = true
