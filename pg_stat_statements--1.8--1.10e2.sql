@@ -1,4 +1,4 @@
-/* contrib/pg_stat_statements/pg_stat_statements--1.10e1--1.10e2.sql */
+/* contrib/pg_stat_statements/pg_stat_statements--1.8--1.10e2.sql */
 
 -- complain if script is sourced in psql, rather than via ALTER EXTENSION
 \echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.10e2'" to load this file. \quit
@@ -46,11 +46,11 @@ BEGIN
 END
 $pgss$;
 
-/* Drop the 1.10e1 definitions (pg_stat_statements_reset and pg_stat_statements_info are unchanged) */
+/* Drop the 1.8 definitions (pg_stat_statements_reset is unchanged; pg_stat_statements_info is added as in 1.9) */
 DROP VIEW pg_stat_statements;
 DROP FUNCTION pg_stat_statements(boolean);
 
-/* Now redefine: upstream 1.10 columns + stats_last + stats_since; bind_types removed (eXperDB) */
+/* Now redefine: upstream 1.10 columns + stats_last + stats_since (eXperDB), direct from 1.8 */
 CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT userid oid,
     OUT dbid oid,
@@ -106,6 +106,21 @@ CREATE VIEW pg_stat_statements AS
   SELECT * FROM pg_stat_statements(true);
 
 GRANT SELECT ON pg_stat_statements TO PUBLIC;
+
+/* 1.9: pg_stat_statements_info */
+--- Define pg_stat_statements_info
+CREATE FUNCTION pg_stat_statements_info(
+    OUT dealloc bigint,
+    OUT stats_reset timestamp with time zone
+)
+RETURNS record
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT VOLATILE PARALLEL SAFE;
+
+CREATE VIEW pg_stat_statements_info AS
+  SELECT * FROM pg_stat_statements_info();
+
+GRANT SELECT ON pg_stat_statements_info TO PUBLIC;
 
 /* eXperDB: ALTER EXTENSION UPDATE keeps the comment the extension was created
  * with; set the one of this version so that \dx shows what is installed */

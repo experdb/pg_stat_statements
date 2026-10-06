@@ -24,6 +24,8 @@ install_data(
   'pg_stat_statements--1.10--1.10e2.sql',
   'pg_stat_statements--1.10e1--1.10e2.sql',
   'pg_stat_statements--1.10e2--1.10e1.sql',
+  'pg_stat_statements--1.8--1.10e2.sql',
+  'pg_stat_statements--1.9--1.10e2.sql',
   'pg_stat_statements--1.9--1.10.sql',
   'pg_stat_statements--1.8--1.9.sql',
   'pg_stat_statements--1.7--1.8.sql',

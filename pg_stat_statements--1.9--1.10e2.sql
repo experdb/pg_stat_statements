@@ -1,4 +1,4 @@
-/* contrib/pg_stat_statements/pg_stat_statements--1.10e1--1.10e2.sql */
+/* contrib/pg_stat_statements/pg_stat_statements--1.9--1.10e2.sql */
 
 -- complain if script is sourced in psql, rather than via ALTER EXTENSION
 \echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.10e2'" to load this file. \quit
@@ -46,11 +46,11 @@ BEGIN
 END
 $pgss$;
 
-/* Drop the 1.10e1 definitions (pg_stat_statements_reset and pg_stat_statements_info are unchanged) */
+/* Drop the 1.9 definitions (pg_stat_statements_reset is unchanged; pg_stat_statements_info is unchanged) */
 DROP VIEW pg_stat_statements;
 DROP FUNCTION pg_stat_statements(boolean);
 
-/* Now redefine: upstream 1.10 columns + stats_last + stats_since; bind_types removed (eXperDB) */
+/* Now redefine: upstream 1.10 columns + stats_last + stats_since (eXperDB), direct from 1.9 */
 CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT userid oid,
     OUT dbid oid,
