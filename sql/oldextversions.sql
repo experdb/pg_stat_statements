@@ -48,11 +48,26 @@ AlTER EXTENSION pg_stat_statements UPDATE TO '1.10';
 \d pg_stat_statements
 SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
 
-DROP EXTENSION pg_stat_statements;
-
--- New functions and views for pg_stat_statements in 1.10e1
-AlTER EXTENSION pg_stat_statements UPDATE TO '1.10e1';
+-- eXperDB 1.10e2: stats_last and stats_since appended to pg_stat_statements
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.10e2';
 \d pg_stat_statements
 SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
+-- stats_last is set once the counters have been updated and never precedes stats_since
+SELECT count(*) > 0 AS has_stats_last FROM pg_stat_statements
+  WHERE stats_last IS NOT NULL AND stats_last >= stats_since;
+-- functions using the view's row type survive 1.10e2 -> 1.10e1 -> 1.10e2
+CREATE FUNCTION pgss_dep_test() RETURNS SETOF pg_stat_statements
+  AS 'SELECT * FROM pg_stat_statements' LANGUAGE sql;
+COMMENT ON FUNCTION pgss_dep_test() IS 'dependent';
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.10e1';
+SELECT count(*) > 0 AS has_data FROM pgss_dep_test();
+-- the legacy 1.10e1 definition is served with bind_types always NULL
+SELECT count(bind_types) = 0 AS bind_types_null FROM pg_stat_statements;
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.10e2';
+SELECT count(*) > 0 AS has_data FROM pgss_dep_test();
+SELECT obj_description('pgss_dep_test()'::regprocedure, 'pg_proc') = 'dependent' AS comment_kept;
+SELECT NOT EXISTS (SELECT 1 FROM pg_depend
+                   WHERE objid = 'pgss_dep_test()'::regprocedure AND deptype = 'e') AS not_ext_member;
+DROP FUNCTION pgss_dep_test();
 
 DROP EXTENSION pg_stat_statements;
