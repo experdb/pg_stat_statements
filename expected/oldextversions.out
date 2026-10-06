@@ -250,65 +250,109 @@ SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
  t
 (1 row)
 
-DROP EXTENSION pg_stat_statements;
-
--- New functions and views for pg_stat_statements in 1.10e1
-AlTER EXTENSION pg_stat_statements UPDATE TO '1.10e1';
+-- eXperDB 1.10e2: stats_last and stats_since appended to pg_stat_statements
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.10e2';
 \d pg_stat_statements
                           View "public.pg_stat_statements"
-         Column         |           Type           | Collation | Nullable | Default
+         Column         |           Type           | Collation | Nullable | Default 
 ------------------------+--------------------------+-----------+----------+---------
- userid                 | oid                      |           |          |
- dbid                   | oid                      |           |          |
- toplevel               | boolean                  |           |          |
- queryid                | bigint                   |           |          |
- query                  | text                     |           |          |
- plans                  | bigint                   |           |          |
- total_plan_time        | double precision         |           |          |
- min_plan_time          | double precision         |           |          |
- max_plan_time          | double precision         |           |          |
- mean_plan_time         | double precision         |           |          |
- stddev_plan_time       | double precision         |           |          |
- calls                  | bigint                   |           |          |
- total_exec_time        | double precision         |           |          |
- min_exec_time          | double precision         |           |          |
- max_exec_time          | double precision         |           |          |
- mean_exec_time         | double precision         |           |          |
- stddev_exec_time       | double precision         |           |          |
- rows                   | bigint                   |           |          |
- shared_blks_hit        | bigint                   |           |          |
- shared_blks_read       | bigint                   |           |          |
- shared_blks_dirtied    | bigint                   |           |          |
- shared_blks_written    | bigint                   |           |          |
- local_blks_hit         | bigint                   |           |          |
- local_blks_read        | bigint                   |           |          |
- local_blks_dirtied     | bigint                   |           |          |
- local_blks_written     | bigint                   |           |          |
- temp_blks_read         | bigint                   |           |          |
- temp_blks_written      | bigint                   |           |          |
- blk_read_time          | double precision         |           |          |
- blk_write_time         | double precision         |           |          |
- temp_blk_read_time     | double precision         |           |          |
- temp_blk_write_time    | double precision         |           |          |
- wal_records            | bigint                   |           |          |
- wal_fpi                | bigint                   |           |          |
- wal_bytes              | numeric                  |           |          |
- jit_functions          | bigint                   |           |          |
- jit_generation_time    | double precision         |           |          |
- jit_inlining_count     | bigint                   |           |          |
- jit_inlining_time      | double precision         |           |          |
- jit_optimization_count | bigint                   |           |          |
- jit_optimization_time  | double precision         |           |          |
- jit_emission_count     | bigint                   |           |          |
- jit_emission_time      | double precision         |           |          |
- stats_last             | timestamp with time zone |           |          |
- stats_since            | timestamp with time zone |           |          |
- bind_types             | text                     |           |          |
+ userid                 | oid                      |           |          | 
+ dbid                   | oid                      |           |          | 
+ toplevel               | boolean                  |           |          | 
+ queryid                | bigint                   |           |          | 
+ query                  | text                     |           |          | 
+ plans                  | bigint                   |           |          | 
+ total_plan_time        | double precision         |           |          | 
+ min_plan_time          | double precision         |           |          | 
+ max_plan_time          | double precision         |           |          | 
+ mean_plan_time         | double precision         |           |          | 
+ stddev_plan_time       | double precision         |           |          | 
+ calls                  | bigint                   |           |          | 
+ total_exec_time        | double precision         |           |          | 
+ min_exec_time          | double precision         |           |          | 
+ max_exec_time          | double precision         |           |          | 
+ mean_exec_time         | double precision         |           |          | 
+ stddev_exec_time       | double precision         |           |          | 
+ rows                   | bigint                   |           |          | 
+ shared_blks_hit        | bigint                   |           |          | 
+ shared_blks_read       | bigint                   |           |          | 
+ shared_blks_dirtied    | bigint                   |           |          | 
+ shared_blks_written    | bigint                   |           |          | 
+ local_blks_hit         | bigint                   |           |          | 
+ local_blks_read        | bigint                   |           |          | 
+ local_blks_dirtied     | bigint                   |           |          | 
+ local_blks_written     | bigint                   |           |          | 
+ temp_blks_read         | bigint                   |           |          | 
+ temp_blks_written      | bigint                   |           |          | 
+ blk_read_time          | double precision         |           |          | 
+ blk_write_time         | double precision         |           |          | 
+ temp_blk_read_time     | double precision         |           |          | 
+ temp_blk_write_time    | double precision         |           |          | 
+ wal_records            | bigint                   |           |          | 
+ wal_fpi                | bigint                   |           |          | 
+ wal_bytes              | numeric                  |           |          | 
+ jit_functions          | bigint                   |           |          | 
+ jit_generation_time    | double precision         |           |          | 
+ jit_inlining_count     | bigint                   |           |          | 
+ jit_inlining_time      | double precision         |           |          | 
+ jit_optimization_count | bigint                   |           |          | 
+ jit_optimization_time  | double precision         |           |          | 
+ jit_emission_count     | bigint                   |           |          | 
+ jit_emission_time      | double precision         |           |          | 
+ stats_last             | timestamp with time zone |           |          | 
+ stats_since            | timestamp with time zone |           |          | 
 
 SELECT count(*) > 0 AS has_data FROM pg_stat_statements;
- has_data
+ has_data 
 ----------
  t
 (1 row)
 
+-- stats_last is set once the counters have been updated and never precedes stats_since
+SELECT count(*) > 0 AS has_stats_last FROM pg_stat_statements
+  WHERE stats_last IS NOT NULL AND stats_last >= stats_since;
+ has_stats_last 
+----------------
+ t
+(1 row)
+
+-- functions using the view's row type survive 1.10e2 -> 1.10e1 -> 1.10e2
+CREATE FUNCTION pgss_dep_test() RETURNS SETOF pg_stat_statements
+  AS 'SELECT * FROM pg_stat_statements' LANGUAGE sql;
+COMMENT ON FUNCTION pgss_dep_test() IS 'dependent';
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.10e1';
+SELECT count(*) > 0 AS has_data FROM pgss_dep_test();
+ has_data 
+----------
+ t
+(1 row)
+
+-- the legacy 1.10e1 definition is served with bind_types always NULL
+SELECT count(bind_types) = 0 AS bind_types_null FROM pg_stat_statements;
+ bind_types_null 
+-----------------
+ t
+(1 row)
+
+AlTER EXTENSION pg_stat_statements UPDATE TO '1.10e2';
+SELECT count(*) > 0 AS has_data FROM pgss_dep_test();
+ has_data 
+----------
+ t
+(1 row)
+
+SELECT obj_description('pgss_dep_test()'::regprocedure, 'pg_proc') = 'dependent' AS comment_kept;
+ comment_kept 
+--------------
+ t
+(1 row)
+
+SELECT NOT EXISTS (SELECT 1 FROM pg_depend
+                   WHERE objid = 'pgss_dep_test()'::regprocedure AND deptype = 'e') AS not_ext_member;
+ not_ext_member 
+----------------
+ t
+(1 row)
+
+DROP FUNCTION pgss_dep_test();
 DROP EXTENSION pg_stat_statements;
