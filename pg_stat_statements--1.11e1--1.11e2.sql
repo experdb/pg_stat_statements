@@ -18,6 +18,8 @@ BEGIN
   SELECT jsonb_build_object(
            'view_acl', (SELECT relacl::text[] FROM pg_class WHERE oid = 'pg_stat_statements'::regclass),
            'funcs', coalesce(jsonb_agg(jsonb_build_object(
+                      'nsp',   n.nspname,
+                      'name',  p.proname,
                       'sig',   format('%I.%I(%s)', n.nspname, p.proname,
                                       pg_get_function_identity_arguments(p.oid)),
                       'def',   pg_get_functiondef(p.oid),
@@ -30,8 +32,10 @@ BEGIN
   WHERE p.oid IN (SELECT d.objid FROM pg_depend d
                   WHERE d.classid = 'pg_proc'::regclass
                     AND d.refclassid = 'pg_type'::regclass
-                    AND d.refobjid = (SELECT reltype FROM pg_class
-                                      WHERE oid = 'pg_stat_statements'::regclass)
+                    AND d.refobjid IN (SELECT t.oid FROM pg_class c
+                                       JOIN pg_type t ON t.oid IN (c.reltype, (SELECT typarray FROM pg_type
+                                                                                WHERE oid = c.reltype))
+                                       WHERE c.oid = 'pg_stat_statements'::regclass)
                     AND d.deptype = 'n');
 
   PERFORM set_config('experdb_pgss.saved', saved::text, true);
@@ -108,15 +112,26 @@ CREATE VIEW pg_stat_statements AS
 
 GRANT SELECT ON pg_stat_statements TO PUBLIC;
 
+/* eXperDB: ALTER EXTENSION UPDATE keeps the comment the extension was created
+ * with; set the one of this version so that \dx shows what is installed */
+COMMENT ON EXTENSION pg_stat_statements IS 'track planning and execution statistics of all SQL statements executed (eXperDB 1.11e2: +stats_last)';
+
 /* eXperDB: restore the saved functions and the view's privileges */
 DO $pgss$
 DECLARE
   saved jsonb := current_setting('experdb_pgss.saved')::jsonb;
   r     jsonb;
   g     record;
+  cur   aclitem[];
+  own   oid;
 BEGIN
   IF jsonb_typeof(saved->'view_acl') = 'array' THEN
+    /* start from the owner alone (drop PUBLIC and anything ALTER DEFAULT PRIVILEGES added) */
+    SELECT c.relacl, c.relowner INTO cur, own FROM pg_class c WHERE c.oid = 'pg_stat_statements'::regclass;
     REVOKE ALL ON pg_stat_statements FROM PUBLIC;
+    FOR g IN SELECT DISTINCT a.grantee FROM aclexplode(cur) a WHERE a.grantee NOT IN (0, own) LOOP
+      EXECUTE format('REVOKE ALL ON pg_stat_statements FROM %I', pg_get_userbyid(g.grantee));
+    END LOOP;
     FOR g IN SELECT a.grantee, a.privilege_type, a.is_grantable
              FROM aclexplode(ARRAY(SELECT jsonb_array_elements_text(saved->'view_acl'))::aclitem[]) a
     LOOP
@@ -128,23 +143,45 @@ BEGIN
 
   FOR r IN SELECT * FROM jsonb_array_elements(saved->'funcs') LOOP
     EXECUTE r->>'def';
-    /* created inside this script, so it was made an extension member: undo that */
-    EXECUTE 'ALTER EXTENSION pg_stat_statements DROP FUNCTION ' || (r->>'sig');
     EXECUTE format('ALTER FUNCTION %s OWNER TO %I', r->>'sig', r->>'owner');
-    IF jsonb_typeof(r->'acl') = 'array' THEN
+
+    SELECT p.proacl, p.proowner INTO cur, own
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = r->>'nsp' AND p.proname = r->>'name'
+      AND format('%I.%I(%s)', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)) = r->>'sig';
+    IF cur IS NOT NULL OR jsonb_typeof(r->'acl') = 'array' THEN
+      /* start from the owner alone (drop PUBLIC and anything ALTER DEFAULT PRIVILEGES added) */
       EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', r->>'sig');
-      FOR g IN SELECT a.grantee, a.is_grantable
-               FROM aclexplode(ARRAY(SELECT jsonb_array_elements_text(r->'acl'))::aclitem[]) a
-               WHERE a.privilege_type = 'EXECUTE'
-      LOOP
-        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %s%s', r->>'sig',
-                       CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(g.grantee)) END,
-                       CASE WHEN g.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+      FOR g IN SELECT DISTINCT a.grantee FROM aclexplode(cur) a WHERE a.grantee NOT IN (0, own) LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %I', r->>'sig', pg_get_userbyid(g.grantee));
       END LOOP;
+      IF jsonb_typeof(r->'acl') = 'array' THEN
+        FOR g IN SELECT a.grantee, a.is_grantable
+                 FROM aclexplode(ARRAY(SELECT jsonb_array_elements_text(r->'acl'))::aclitem[]) a
+                 WHERE a.privilege_type = 'EXECUTE'
+        LOOP
+          EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %s%s', r->>'sig',
+                         CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(g.grantee)) END,
+                         CASE WHEN g.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+        END LOOP;
+      ELSE
+        /* the function had the default privileges */
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO PUBLIC', r->>'sig');
+      END IF;
     END IF;
+
     IF r->>'cmt' IS NOT NULL THEN
       EXECUTE format('COMMENT ON FUNCTION %s IS %L', r->>'sig', r->>'cmt');
     END IF;
+
+    /*
+     * The function was created inside this script, so it became an extension
+     * member, and every GRANT/REVOKE above was recorded in pg_init_privs.
+     * "ALTER EXTENSION ... DROP" undoes both; it must stay the last step, or
+     * pg_dump would treat the site's privileges as extension defaults and
+     * stop dumping them.
+     */
+    EXECUTE 'ALTER EXTENSION pg_stat_statements DROP FUNCTION ' || (r->>'sig');
   END LOOP;
 END
 $pgss$;

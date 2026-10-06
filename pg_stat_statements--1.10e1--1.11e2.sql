@@ -1,4 +1,4 @@
-/* contrib/pg_stat_statements/pg_stat_statements--1.11--1.11e2.sql */
+/* contrib/pg_stat_statements/pg_stat_statements--1.10e1--1.11e2.sql */
 
 -- complain if script is sourced in psql, rather than via ALTER EXTENSION
 \echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.11e2'" to load this file. \quit
@@ -46,11 +46,12 @@ BEGIN
 END
 $pgss$;
 
-/* Drop the 1.11 definitions (pg_stat_statements_reset is unchanged) */
+/* Drop the 1.10e1 definitions (pg_stat_statements_reset is redefined below as in 1.11) */
 DROP VIEW pg_stat_statements;
 DROP FUNCTION pg_stat_statements(boolean);
+DROP FUNCTION pg_stat_statements_reset(Oid, Oid, bigint);
 
-/* Now redefine: upstream 1.11 columns + stats_last (eXperDB) */
+/* Now redefine: upstream 1.11 columns + stats_last; bind_types removed (eXperDB), direct from 1.10e1 */
 CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT userid oid,
     OUT dbid oid,
@@ -111,6 +112,35 @@ CREATE VIEW pg_stat_statements AS
   SELECT * FROM pg_stat_statements(true);
 
 GRANT SELECT ON pg_stat_statements TO PUBLIC;
+
+/* 1.11: pg_stat_statements_reset(userid, dbid, queryid, minmax_only) returns the reset time */
+CREATE FUNCTION pg_stat_statements_reset(IN userid Oid DEFAULT 0,
+	IN dbid Oid DEFAULT 0,
+	IN queryid bigint DEFAULT 0,
+	IN minmax_only boolean DEFAULT false
+)
+RETURNS timestamp with time zone
+AS 'MODULE_PATHNAME', 'pg_stat_statements_reset_1_11'
+LANGUAGE C STRICT PARALLEL SAFE;
+
+-- Don't want this to be available to non-superusers.
+REVOKE ALL ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint, boolean) FROM PUBLIC;
+
+/* eXperDB: ALTER DEFAULT PRIVILEGES may have granted the recreated reset function
+ * to other roles; keep it superuser-only as upstream intends */
+DO $pgss$
+DECLARE
+  g record;
+BEGIN
+  FOR g IN SELECT DISTINCT a.grantee FROM pg_proc p, aclexplode(p.proacl) a
+           WHERE p.oid = 'pg_stat_statements_reset(oid,oid,bigint,boolean)'::regprocedure
+             AND a.grantee NOT IN (0, p.proowner)
+  LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION pg_stat_statements_reset(oid,oid,bigint,boolean) FROM %I',
+                   pg_get_userbyid(g.grantee));
+  END LOOP;
+END
+$pgss$;
 
 /* eXperDB: ALTER EXTENSION UPDATE keeps the comment the extension was created
  * with; set the one of this version so that \dx shows what is installed */

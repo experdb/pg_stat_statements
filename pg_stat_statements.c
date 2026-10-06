@@ -118,6 +118,8 @@ typedef enum pgssVersion
 	PGSS_V1_8,
 	PGSS_V1_9,
 	PGSS_V1_10,
+	PGSS_V1_10E2,				/* eXperDB: 1.10 + stats_last + stats_since (PostgreSQL 15/16 definition) */
+	PGSS_V1_10E1,				/* eXperDB: legacy 1.10e1 SQL definition (PostgreSQL 15/16) */
 	PGSS_V1_11,
 	PGSS_V1_11E2,				/* eXperDB: 1.11 + stats_last */
 	PGSS_V1_11E1,				/* eXperDB: legacy 1.11e1 SQL definition */
@@ -326,6 +328,7 @@ PG_FUNCTION_INFO_V1(pg_stat_statements_1_3);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_8);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_9);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_10);
+PG_FUNCTION_INFO_V1(pg_stat_statements_1_10e2);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_11);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_11e2);
 PG_FUNCTION_INFO_V1(pg_stat_statements);
@@ -1557,6 +1560,8 @@ pg_stat_statements_reset(PG_FUNCTION_ARGS)
 #define PG_STAT_STATEMENTS_COLS_V1_8	32
 #define PG_STAT_STATEMENTS_COLS_V1_9	33
 #define PG_STAT_STATEMENTS_COLS_V1_10	43
+#define PG_STAT_STATEMENTS_COLS_V1_10E2	45	/* eXperDB: 1.10 + stats_last + stats_since (PostgreSQL 15/16) */
+#define PG_STAT_STATEMENTS_COLS_V1_10E1	46	/* eXperDB: legacy 1.10e1 (+ bind_types), PostgreSQL 15/16 */
 #define PG_STAT_STATEMENTS_COLS_V1_11	49
 #define PG_STAT_STATEMENTS_COLS_V1_11E2	50	/* eXperDB: 1.11 + stats_last */
 #define PG_STAT_STATEMENTS_COLS_V1_11E1	51	/* eXperDB: legacy 1.11e1 (+ bind_types) */
@@ -1589,6 +1594,23 @@ pg_stat_statements_1_11e2(PG_FUNCTION_ARGS)
 	bool		showtext = PG_GETARG_BOOL(0);
 
 	pg_stat_statements_internal(fcinfo, PGSS_V1_11E2, showtext);
+
+	return (Datum) 0;
+}
+
+/*
+ * eXperDB 1.10e2 (PostgreSQL 15/16): the 1.10 column set plus stats_last and
+ * stats_since.  A cluster upgraded with pg_upgrade from PostgreSQL 15/16 keeps
+ * that SQL definition until ALTER EXTENSION ... UPDATE TO '1.11e2'; the
+ * symbol must exist for pg_upgrade to restore it, and serving it keeps the
+ * view readable in between.
+ */
+Datum
+pg_stat_statements_1_10e2(PG_FUNCTION_ARGS)
+{
+	bool		showtext = PG_GETARG_BOOL(0);
+
+	pg_stat_statements_internal(fcinfo, PGSS_V1_10E2, showtext);
 
 	return (Datum) 0;
 }
@@ -1722,6 +1744,28 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 		case PG_STAT_STATEMENTS_COLS_V1_10:
 			if (api_version != PGSS_V1_10)
 				elog(ERROR, "incorrect number of output arguments");
+			break;
+		case PG_STAT_STATEMENTS_COLS_V1_10E2:
+			/*
+			 * eXperDB: the 1.10e2 definition of PostgreSQL 15/16 (bound to
+			 * pg_stat_statements_1_10e2).  The 1.10e1 package also shipped a
+			 * 45-column "1.10" definition bound to pg_stat_statements_1_10; serve
+			 * that one too, as the PostgreSQL 15/16 library does.
+			 */
+			if (api_version != PGSS_V1_10E2 && api_version != PGSS_V1_10)
+				elog(ERROR, "incorrect number of output arguments");
+			api_version = PGSS_V1_10E2;
+			break;
+		case PG_STAT_STATEMENTS_COLS_V1_10E1:
+			/*
+			 * eXperDB: the legacy 1.10e1 SQL definition of PostgreSQL 15/16 (46
+			 * columns, ending in bind_types) is bound to pg_stat_statements_1_10.
+			 * Serve it, with bind_types NULL, so the view works after pg_upgrade
+			 * until ALTER EXTENSION ... UPDATE TO '1.11e2'.
+			 */
+			if (api_version != PGSS_V1_10)
+				elog(ERROR, "incorrect number of output arguments");
+			api_version = PGSS_V1_10E1;
 			break;
 		case PG_STAT_STATEMENTS_COLS_V1_11:
 			if (api_version != PGSS_V1_11)
@@ -2005,6 +2049,21 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 			/* eXperDB: legacy 1.11e1 definition only; bind_types is not computed */
 			nulls[i++] = true;
 		}
+		if (api_version == PGSS_V1_10E2 || api_version == PGSS_V1_10E1)
+		{
+			/*
+			 * eXperDB: PostgreSQL 15/16 definitions kept by pg_upgrade: the 1.10
+			 * columns above, then stats_last, stats_since (and bind_types, NULL,
+			 * for 1.10e1).
+			 */
+			if (stats_last != 0)
+				values[i++] = TimestampTzGetDatum(stats_last);
+			else
+				nulls[i++] = true;
+			values[i++] = TimestampTzGetDatum(stats_since);
+			if (api_version == PGSS_V1_10E1)
+				nulls[i++] = true;
+		}
 
 		Assert(i == (api_version == PGSS_V1_0 ? PG_STAT_STATEMENTS_COLS_V1_0 :
 					 api_version == PGSS_V1_1 ? PG_STAT_STATEMENTS_COLS_V1_1 :
@@ -2013,6 +2072,8 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 					 api_version == PGSS_V1_8 ? PG_STAT_STATEMENTS_COLS_V1_8 :
 					 api_version == PGSS_V1_9 ? PG_STAT_STATEMENTS_COLS_V1_9 :
 					 api_version == PGSS_V1_10 ? PG_STAT_STATEMENTS_COLS_V1_10 :
+					 api_version == PGSS_V1_10E2 ? PG_STAT_STATEMENTS_COLS_V1_10E2 :
+					 api_version == PGSS_V1_10E1 ? PG_STAT_STATEMENTS_COLS_V1_10E1 :
 					 api_version == PGSS_V1_11 ? PG_STAT_STATEMENTS_COLS_V1_11 :
 					 api_version == PGSS_V1_11E2 ? PG_STAT_STATEMENTS_COLS_V1_11E2 :
 					 api_version == PGSS_V1_11E1 ? PG_STAT_STATEMENTS_COLS_V1_11E1 :
