@@ -21,10 +21,11 @@
  *
  * Note about locking issues: to create or delete an entry in the shared
  * hashtable, one must hold pgss->lock exclusively.  Modifying any field
- * in an entry except the counters requires the same.  To look up an entry,
- * one must hold the lock shared.  To read or update the counters within
- * an entry, one must hold the lock shared or exclusive (so the entry doesn't
- * disappear!) and also take the entry's mutex spinlock.
+ * in an entry except the counters (and stats_last, eXperDB) requires the
+ * same.  To look up an entry, one must hold the lock shared.  To read or
+ * update the counters or stats_last within an entry, one must hold the lock
+ * shared or exclusive (so the entry doesn't disappear!) and also take the
+ * entry's mutex spinlock.
  * The shared state variable pgss->extent (the next free spot in the external
  * query-text file) should be accessed only while holding either the
  * pgss->mutex spinlock, or exclusive lock on pgss->lock.  We use the mutex to
@@ -85,7 +86,13 @@ PG_MODULE_MAGIC_EXT(
 #define PGSS_TEXT_FILE	PG_STAT_TMP_DIR "/pgss_query_texts.stat"
 
 /* Magic number identifying the stats file format */
-static const uint32 PGSS_FILE_HEADER = 0x20220408;
+/*
+ * eXperDB 1.12e2: pgssEntry carries an extra stats_last field, so the
+ * on-disk layout differs from upstream 1.12 (0x20220408).  eXperDB 1.12e1
+ * wrote its files under the upstream header although its entries were
+ * larger.  A distinct header makes pgss_shmem_startup() discard both.
+ */
+static const uint32 PGSS_FILE_HEADER = 0x20261103;
 
 /* PostgreSQL major version number, changes in which invalidate all entries */
 static const uint32 PGSS_PG_MAJOR_VERSION = PG_VERSION_NUM / 100;
@@ -112,8 +119,17 @@ typedef enum pgssVersion
 	PGSS_V1_8,
 	PGSS_V1_9,
 	PGSS_V1_10,
+	PGSS_V1_10E2,				/* eXperDB: 1.10 + stats_last + stats_since (PostgreSQL 15/16 definition) */
+	PGSS_V1_10E1,				/* eXperDB: legacy 1.10e1 SQL definition (PostgreSQL 15/16) */
 	PGSS_V1_11,
+	PGSS_V1_11E2,				/* eXperDB: 1.11 + stats_last (PostgreSQL 17 definition) */
+	PGSS_V1_11E1,				/* eXperDB: legacy 1.11e1 SQL definition (PostgreSQL 17) */
 	PGSS_V1_12,
+	PGSS_V1_12E2,				/* eXperDB: 1.12 + stats_last (also serves 1.12e1) */
+	/*
+	 * eXperDB: the stats_last output block tests "api_version >= PGSS_V1_12E2";
+	 * revisit it when a version is added after PGSS_V1_12E2.
+	 */
 } pgssVersion;
 
 typedef enum pgssStoreKind
@@ -235,10 +251,10 @@ typedef struct pgssEntry
 	Size		query_offset;	/* query text offset in external file */
 	int			query_len;		/* # of valid bytes in query string, or -1 */
 	int			encoding;		/* query text encoding */
-	TimestampTz stats_last;		/* timestamp of last values update */
 	TimestampTz stats_since;	/* timestamp of entry allocation */
 	TimestampTz minmax_stats_since; /* timestamp of last min/max values reset */
-	slock_t		mutex;			/* protects the counters only */
+	TimestampTz stats_last;		/* eXperDB: timestamp of last counters update */
+	slock_t		mutex;			/* protects the counters and stats_last */
 } pgssEntry;
 
 /*
@@ -322,8 +338,11 @@ PG_FUNCTION_INFO_V1(pg_stat_statements_1_3);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_8);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_9);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_10);
+PG_FUNCTION_INFO_V1(pg_stat_statements_1_10e2);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_11);
+PG_FUNCTION_INFO_V1(pg_stat_statements_1_11e2);
 PG_FUNCTION_INFO_V1(pg_stat_statements_1_12);
+PG_FUNCTION_INFO_V1(pg_stat_statements_1_12e2);
 PG_FUNCTION_INFO_V1(pg_stat_statements);
 PG_FUNCTION_INFO_V1(pg_stat_statements_info);
 
@@ -666,9 +685,9 @@ pgss_shmem_startup(void)
 
 		/* copy in the actual stats */
 		entry->counters = temp.counters;
-		entry->stats_last = temp.stats_last;
 		entry->stats_since = temp.stats_since;
 		entry->minmax_stats_since = temp.minmax_stats_since;
+		entry->stats_last = temp.stats_last;
 	}
 
 	/* Read global statistics for pg_stat_statements */
@@ -800,7 +819,7 @@ pgss_shmem_shutdown(int code, Datum arg)
 	if (fwrite(&pgss->stats, sizeof(pgssGlobalStats), 1, file) != 1)
 		goto error;
 
-	free(qbuffer);
+	pfree(qbuffer);
 	qbuffer = NULL;
 
 	if (FreeFile(file))
@@ -824,7 +843,8 @@ error:
 			(errcode_for_file_access(),
 			 errmsg("could not write file \"%s\": %m",
 					PGSS_DUMP_FILE ".tmp")));
-	free(qbuffer);
+	if (qbuffer)
+		pfree(qbuffer);
 	if (file)
 		FreeFile(file);
 	unlink(PGSS_DUMP_FILE ".tmp");
@@ -1397,6 +1417,9 @@ pgss_store(const char *query, int64 queryId,
 	/* Increment the counts, except when jstate is not NULL */
 	if (!jstate)
 	{
+		/* eXperDB: take the timestamp before entering the spinlock */
+		TimestampTz stats_last = GetCurrentTimestamp();
+
 		Assert(kind == PGSS_PLAN || kind == PGSS_EXEC);
 
 		/*
@@ -1497,7 +1520,9 @@ pgss_store(const char *query, int64 queryId,
 		entry->counters.parallel_workers_to_launch += parallel_workers_to_launch;
 		entry->counters.parallel_workers_launched += parallel_workers_launched;
 
-		entry->stats_last = GetCurrentTimestamp();
+		/* eXperDB: keep stats_last monotonic under concurrent updates */
+		if (stats_last > entry->stats_last)
+			entry->stats_last = stats_last;
 
 		SpinLockRelease(&entry->mutex);
 	}
@@ -1564,8 +1589,13 @@ pg_stat_statements_reset(PG_FUNCTION_ARGS)
 #define PG_STAT_STATEMENTS_COLS_V1_8	32
 #define PG_STAT_STATEMENTS_COLS_V1_9	33
 #define PG_STAT_STATEMENTS_COLS_V1_10	43
+#define PG_STAT_STATEMENTS_COLS_V1_10E2	45	/* eXperDB: 1.10 + stats_last + stats_since (PostgreSQL 15/16) */
+#define PG_STAT_STATEMENTS_COLS_V1_10E1	46	/* eXperDB: legacy 1.10e1 (+ bind_types), PostgreSQL 15/16 */
 #define PG_STAT_STATEMENTS_COLS_V1_11	49
-#define PG_STAT_STATEMENTS_COLS_V1_12	53
+#define PG_STAT_STATEMENTS_COLS_V1_11E2	50	/* eXperDB: 1.11 + stats_last (PostgreSQL 17) */
+#define PG_STAT_STATEMENTS_COLS_V1_11E1	51	/* eXperDB: legacy 1.11e1 (+ bind_types), PostgreSQL 17 */
+#define PG_STAT_STATEMENTS_COLS_V1_12	52
+#define PG_STAT_STATEMENTS_COLS_V1_12E2	53	/* eXperDB: 1.12 + stats_last (= 1.12e1 layout) */
 #define PG_STAT_STATEMENTS_COLS			53	/* maximum of above */
 
 /*
@@ -1578,12 +1608,54 @@ pg_stat_statements_reset(PG_FUNCTION_ARGS)
  * expected API version is identified by embedding it in the C name of the
  * function.  Unfortunately we weren't bright enough to do that for 1.1.
  */
+/* eXperDB 1.12e2: the 1.12 column set plus stats_last */
+Datum
+pg_stat_statements_1_12e2(PG_FUNCTION_ARGS)
+{
+	bool		showtext = PG_GETARG_BOOL(0);
+
+	pg_stat_statements_internal(fcinfo, PGSS_V1_12E2, showtext);
+
+	return (Datum) 0;
+}
+
 Datum
 pg_stat_statements_1_12(PG_FUNCTION_ARGS)
 {
 	bool		showtext = PG_GETARG_BOOL(0);
 
 	pg_stat_statements_internal(fcinfo, PGSS_V1_12, showtext);
+
+	return (Datum) 0;
+}
+
+/*
+ * eXperDB 1.11e2 (PostgreSQL 17): the 1.11 column set plus stats_last.  A
+ * cluster upgraded with pg_upgrade from PostgreSQL 17 keeps that SQL
+ * definition until ALTER EXTENSION ... UPDATE TO '1.12e2'; the symbol must
+ * exist for pg_upgrade to restore it, and serving it keeps the view readable
+ * in between.
+ */
+Datum
+pg_stat_statements_1_11e2(PG_FUNCTION_ARGS)
+{
+	bool		showtext = PG_GETARG_BOOL(0);
+
+	pg_stat_statements_internal(fcinfo, PGSS_V1_11E2, showtext);
+
+	return (Datum) 0;
+}
+
+/*
+ * eXperDB 1.10e2 (PostgreSQL 15/16): the 1.10 column set plus stats_last and
+ * stats_since.  Kept for pg_upgrade from PostgreSQL 15/16, as above.
+ */
+Datum
+pg_stat_statements_1_10e2(PG_FUNCTION_ARGS)
+{
+	bool		showtext = PG_GETARG_BOOL(0);
+
+	pg_stat_statements_internal(fcinfo, PGSS_V1_10E2, showtext);
 
 	return (Datum) 0;
 }
@@ -1728,13 +1800,59 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 			if (api_version != PGSS_V1_10)
 				elog(ERROR, "incorrect number of output arguments");
 			break;
+		case PG_STAT_STATEMENTS_COLS_V1_10E2:
+			/*
+			 * eXperDB: the 1.10e2 definition of PostgreSQL 15/16 (bound to
+			 * pg_stat_statements_1_10e2).  The 1.10e1 package also shipped a
+			 * 45-column "1.10" definition bound to pg_stat_statements_1_10; serve
+			 * that one too, as the PostgreSQL 15/16 library does.
+			 */
+			if (api_version != PGSS_V1_10E2 && api_version != PGSS_V1_10)
+				elog(ERROR, "incorrect number of output arguments");
+			api_version = PGSS_V1_10E2;
+			break;
+		case PG_STAT_STATEMENTS_COLS_V1_10E1:
+			/*
+			 * eXperDB: the legacy 1.10e1 SQL definition of PostgreSQL 15/16 (46
+			 * columns, ending in bind_types) is bound to pg_stat_statements_1_10.
+			 * Serve it, with bind_types NULL, so the view works after pg_upgrade
+			 * until ALTER EXTENSION ... UPDATE TO '1.12e2'.
+			 */
+			if (api_version != PGSS_V1_10)
+				elog(ERROR, "incorrect number of output arguments");
+			api_version = PGSS_V1_10E1;
+			break;
 		case PG_STAT_STATEMENTS_COLS_V1_11:
 			if (api_version != PGSS_V1_11)
 				elog(ERROR, "incorrect number of output arguments");
 			break;
+		case PG_STAT_STATEMENTS_COLS_V1_11E2:
+			if (api_version != PGSS_V1_11E2)
+				elog(ERROR, "incorrect number of output arguments");
+			break;
+		case PG_STAT_STATEMENTS_COLS_V1_11E1:
+			/*
+			 * eXperDB: the legacy 1.11e1 SQL definition of PostgreSQL 17 (51
+			 * columns, ending in bind_types) is bound to pg_stat_statements_1_11.
+			 * Serve it, with bind_types NULL, so the view works after pg_upgrade
+			 * until ALTER EXTENSION ... UPDATE TO '1.12e2'.
+			 */
+			if (api_version != PGSS_V1_11)
+				elog(ERROR, "incorrect number of output arguments");
+			api_version = PGSS_V1_11E1;
+			break;
 		case PG_STAT_STATEMENTS_COLS_V1_12:
 			if (api_version != PGSS_V1_12)
 				elog(ERROR, "incorrect number of output arguments");
+			break;
+		case PG_STAT_STATEMENTS_COLS_V1_12E2:
+			/*
+			 * eXperDB: the legacy 1.12e1 SQL definition has the same 53 columns
+			 * but is bound to pg_stat_statements_1_12.  Serve both as 1.12e2.
+			 */
+			if (api_version != PGSS_V1_12E2 && api_version != PGSS_V1_12)
+				elog(ERROR, "incorrect number of output arguments");
+			api_version = PGSS_V1_12E2;
 			break;
 		default:
 			elog(ERROR, "incorrect number of output arguments");
@@ -1795,7 +1913,8 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 			pgss->extent != extent ||
 			pgss->gc_count != gc_count)
 		{
-			free(qbuffer);
+			if (qbuffer)
+				pfree(qbuffer);
 			qbuffer = qtext_load_file(&qbuffer_size);
 		}
 	}
@@ -1809,9 +1928,9 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 		Counters	tmp;
 		double		stddev;
 		int64		queryid = entry->key.queryid;
-		TimestampTz stats_last;
 		TimestampTz stats_since;
 		TimestampTz minmax_stats_since;
+		TimestampTz stats_last;
 
 		memset(values, 0, sizeof(values));
 		memset(nulls, 0, sizeof(nulls));
@@ -1995,9 +2114,34 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 			values[i++] = TimestampTzGetDatum(stats_since);
 			values[i++] = TimestampTzGetDatum(minmax_stats_since);
 		}
-		if (api_version >= PGSS_V1_12)
+		if (api_version == PGSS_V1_11E2 || api_version == PGSS_V1_11E1 ||
+			api_version >= PGSS_V1_12E2)
 		{
-			values[i++] = TimestampTzGetDatum(stats_last);
+			/* eXperDB: NULL until the counters have been updated once */
+			if (stats_last != 0)
+				values[i++] = TimestampTzGetDatum(stats_last);
+			else
+				nulls[i++] = true;
+		}
+		if (api_version == PGSS_V1_11E1)
+		{
+			/* eXperDB: legacy 1.11e1 definition only; bind_types is not computed */
+			nulls[i++] = true;
+		}
+		if (api_version == PGSS_V1_10E2 || api_version == PGSS_V1_10E1)
+		{
+			/*
+			 * eXperDB: PostgreSQL 15/16 definitions kept by pg_upgrade: the 1.10
+			 * columns above, then stats_last, stats_since (and bind_types, NULL,
+			 * for 1.10e1).
+			 */
+			if (stats_last != 0)
+				values[i++] = TimestampTzGetDatum(stats_last);
+			else
+				nulls[i++] = true;
+			values[i++] = TimestampTzGetDatum(stats_since);
+			if (api_version == PGSS_V1_10E1)
+				nulls[i++] = true;
 		}
 
 		Assert(i == (api_version == PGSS_V1_0 ? PG_STAT_STATEMENTS_COLS_V1_0 :
@@ -2007,8 +2151,13 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 					 api_version == PGSS_V1_8 ? PG_STAT_STATEMENTS_COLS_V1_8 :
 					 api_version == PGSS_V1_9 ? PG_STAT_STATEMENTS_COLS_V1_9 :
 					 api_version == PGSS_V1_10 ? PG_STAT_STATEMENTS_COLS_V1_10 :
+					 api_version == PGSS_V1_10E2 ? PG_STAT_STATEMENTS_COLS_V1_10E2 :
+					 api_version == PGSS_V1_10E1 ? PG_STAT_STATEMENTS_COLS_V1_10E1 :
 					 api_version == PGSS_V1_11 ? PG_STAT_STATEMENTS_COLS_V1_11 :
+					 api_version == PGSS_V1_11E2 ? PG_STAT_STATEMENTS_COLS_V1_11E2 :
+					 api_version == PGSS_V1_11E1 ? PG_STAT_STATEMENTS_COLS_V1_11E1 :
 					 api_version == PGSS_V1_12 ? PG_STAT_STATEMENTS_COLS_V1_12 :
+					 api_version == PGSS_V1_12E2 ? PG_STAT_STATEMENTS_COLS_V1_12E2 :
 					 -1 /* fail if you forget to update this assert */ ));
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
@@ -2016,7 +2165,8 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 
 	LWLockRelease(pgss->lock);
 
-	free(qbuffer);
+	if (qbuffer)
+		pfree(qbuffer);
 }
 
 /* Number of output arguments (columns) for pg_stat_statements_info */
@@ -2115,6 +2265,7 @@ entry_alloc(pgssHashKey *key, Size query_offset, int query_len, int encoding,
 		entry->encoding = encoding;
 		entry->stats_since = GetCurrentTimestamp();
 		entry->minmax_stats_since = entry->stats_since;
+		entry->stats_last = 0;	/* eXperDB: no counters update yet */
 	}
 
 	return entry;
@@ -2303,7 +2454,7 @@ error:
 }
 
 /*
- * Read the external query text file into a malloc'd buffer.
+ * Read the external query text file into a palloc'd buffer.
  *
  * Returns NULL (without throwing an error) if unable to read, eg
  * file not there or insufficient memory.
@@ -2345,7 +2496,7 @@ qtext_load_file(Size *buffer_size)
 
 	/* Allocate buffer; beware that off_t might be wider than size_t */
 	if (stat.st_size <= MaxAllocHugeSize)
-		buf = (char *) malloc(stat.st_size);
+		buf = (char *) palloc_extended(stat.st_size, MCXT_ALLOC_HUGE | MCXT_ALLOC_NO_OOM);
 	else
 		buf = NULL;
 	if (buf == NULL)
@@ -2384,7 +2535,7 @@ qtext_load_file(Size *buffer_size)
 						(errcode_for_file_access(),
 						 errmsg("could not read file \"%s\": %m",
 								PGSS_TEXT_FILE)));
-			free(buf);
+			pfree(buf);
 			CloseTransientFile(fd);
 			return NULL;
 		}
@@ -2595,7 +2746,7 @@ gc_qtexts(void)
 	else
 		pgss->mean_query_len = ASSUMED_LENGTH_INIT;
 
-	free(qbuffer);
+	pfree(qbuffer);
 
 	/*
 	 * OK, count a garbage collection cycle.  (Note: even though we have
@@ -2612,7 +2763,8 @@ gc_fail:
 	/* clean up resources */
 	if (qfile)
 		FreeFile(qfile);
-	free(qbuffer);
+	if (qbuffer)
+		pfree(qbuffer);
 
 	/*
 	 * Since the contents of the external file are now uncertain, mark all
@@ -2818,33 +2970,27 @@ static char *
 generate_normalized_query(JumbleState *jstate, const char *query,
 						  int query_loc, int *query_len_p)
 {
-	char	   *norm_query;
+	StringInfoData norm_query;
 	int			query_len = *query_len_p;
-	int			norm_query_buflen,	/* Space allowed for norm_query */
-				len_to_wrt,		/* Length (in bytes) to write */
+	int			len_to_wrt,		/* Length (in bytes) to write */
 				quer_loc = 0,	/* Source query byte location */
-				n_quer_loc = 0, /* Normalized query byte location */
 				last_off = 0,	/* Offset from start for previous tok */
 				last_tok_len = 0;	/* Length (in bytes) of that tok */
 	int			num_constants_replaced = 0;
 
 	/*
-	 * Get constants' lengths (core system only gives us locations).  Note
-	 * this also ensures the items are sorted by location.
+	 * Our output buffer is an expansible StringInfo, but avoid enlarging it
+	 * in most cases by reserving extra space for each constant location.
 	 */
-	fill_in_constant_lengths(jstate, query, query_loc);
+	Assert(jstate->clocations_count > 0);
+	initStringInfoExt(&norm_query, query_len + jstate->clocations_count * 10);
 
 	/*
-	 * Allow for $n symbols to be longer than the constants they replace.
-	 * Constants must take at least one byte in text form, while a $n symbol
-	 * certainly isn't more than 11 bytes, even if n reaches INT_MAX.  We
-	 * could refine that limit based on the max value of n for the current
-	 * query, but it hardly seems worth any extra effort to do so.
+	 * Determine constants' lengths (core system only gives us locations), and
+	 * return a sorted copy of jstate's LocationLen data with lengths filled
+	 * in.
 	 */
-	norm_query_buflen = query_len + jstate->clocations_count * 10;
-
-	/* Allocate result buffer */
-	norm_query = palloc(norm_query_buflen + 1);
+	fill_in_constant_lengths(jstate, query, query_loc);
 
 	for (int i = 0; i < jstate->clocations_count; i++)
 	{
@@ -2875,17 +3021,16 @@ generate_normalized_query(JumbleState *jstate, const char *query,
 		len_to_wrt = off - last_off;
 		len_to_wrt -= last_tok_len;
 		Assert(len_to_wrt >= 0);
-		memcpy(norm_query + n_quer_loc, query + quer_loc, len_to_wrt);
-		n_quer_loc += len_to_wrt;
+		appendBinaryStringInfo(&norm_query, query + quer_loc, len_to_wrt);
 
 		/*
 		 * And insert a param symbol in place of the constant token; and, if
 		 * we have a squashable list, insert a placeholder comment starting
 		 * from the list's second value.
 		 */
-		n_quer_loc += sprintf(norm_query + n_quer_loc, "$%d%s",
-							  num_constants_replaced + 1 + jstate->highest_extern_param_id,
-							  jstate->clocations[i].squashed ? " /*, ... */" : "");
+		appendStringInfo(&norm_query, "$%d%s",
+						 num_constants_replaced + 1 + jstate->highest_extern_param_id,
+						 jstate->clocations[i].squashed ? " /*, ... */" : "");
 		num_constants_replaced++;
 
 		/* move forward */
@@ -2901,14 +3046,10 @@ generate_normalized_query(JumbleState *jstate, const char *query,
 	len_to_wrt = query_len - quer_loc;
 
 	Assert(len_to_wrt >= 0);
-	memcpy(norm_query + n_quer_loc, query + quer_loc, len_to_wrt);
-	n_quer_loc += len_to_wrt;
+	appendBinaryStringInfo(&norm_query, query + quer_loc, len_to_wrt);
 
-	Assert(n_quer_loc <= norm_query_buflen);
-	norm_query[n_quer_loc] = '\0';
-
-	*query_len_p = n_quer_loc;
-	return norm_query;
+	*query_len_p = norm_query.len;
+	return norm_query.data;
 }
 
 /*
