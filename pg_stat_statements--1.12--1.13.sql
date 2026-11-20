@@ -1,15 +1,18 @@
-/* contrib/pg_stat_statements/pg_stat_statements--1.12e1--1.12e2.sql */
+/* contrib/pg_stat_statements/pg_stat_statements--1.12--1.13.sql */
 
 -- complain if script is sourced in psql, rather than via ALTER EXTENSION
-\echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.12e2'" to load this file. \quit
+\echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.13'" to load this file. \quit
 
-/*
- * eXperDB: 1.12e1 and 1.12e2 have the same columns; only the C function
- * differs.  Replace it in place: the view, its privileges and every object
- * depending on it (eXperDB helper functions, site views) stay untouched.
- */
-/* upstream 1.12 columns + stats_last (eXperDB); same columns as 1.12e1, bound to the 1.12e2 C function */
-CREATE OR REPLACE FUNCTION pg_stat_statements(IN showtext boolean,
+/* First we have to remove them from the extension */
+ALTER EXTENSION pg_stat_statements DROP VIEW pg_stat_statements;
+ALTER EXTENSION pg_stat_statements DROP FUNCTION pg_stat_statements(boolean);
+
+/* Then we can drop them */
+DROP VIEW pg_stat_statements;
+DROP FUNCTION pg_stat_statements(boolean);
+
+/* Now redefine */
+CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT userid oid,
     OUT dbid oid,
     OUT toplevel bool,
@@ -60,14 +63,16 @@ CREATE OR REPLACE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT jit_deform_time float8,
     OUT parallel_workers_to_launch int8,
     OUT parallel_workers_launched int8,
+    OUT generic_plan_calls int8,
+    OUT custom_plan_calls int8,
     OUT stats_since timestamp with time zone,
-    OUT minmax_stats_since timestamp with time zone,
-    OUT stats_last timestamp with time zone
+    OUT minmax_stats_since timestamp with time zone
 )
 RETURNS SETOF record
-AS 'MODULE_PATHNAME', 'pg_stat_statements_1_12e2'
+AS 'MODULE_PATHNAME', 'pg_stat_statements_1_13'
 LANGUAGE C STRICT VOLATILE PARALLEL SAFE;
 
-/* eXperDB: ALTER EXTENSION UPDATE keeps the comment the extension was created
- * with; set the one of this version so that \dx shows what is installed */
-COMMENT ON EXTENSION pg_stat_statements IS 'track planning and execution statistics of all SQL statements executed (eXperDB 1.12e2: +stats_last)';
+CREATE VIEW pg_stat_statements AS
+  SELECT * FROM pg_stat_statements(true);
+
+GRANT SELECT ON pg_stat_statements TO PUBLIC;

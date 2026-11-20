@@ -1,7 +1,7 @@
-/* contrib/pg_stat_statements/pg_stat_statements--1.12--1.12e1.sql */
+/* contrib/pg_stat_statements/pg_stat_statements--1.12--1.13e1.sql */
 
 -- complain if script is sourced in psql, rather than via ALTER EXTENSION
-\echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.12e1'" to load this file. \quit
+\echo Use "ALTER EXTENSION pg_stat_statements UPDATE TO '1.13e1'" to load this file. \quit
 
 /*
  * eXperDB: objects that use the view's row type (for example eXperDB helper
@@ -15,21 +15,21 @@ DECLARE
   saved jsonb;
   r     jsonb;
 BEGIN
-  SELECT jsonb_build_object(
+  SELECT pg_catalog.jsonb_build_object(
            'view_acl', (SELECT relacl::text[] FROM pg_class WHERE oid = 'pg_stat_statements'::regclass),
-           'col_acl', (SELECT coalesce(jsonb_agg(jsonb_build_object('att', a.attname, 'acl', a.attacl::text[])), '[]'::jsonb)
+           'col_acl', (SELECT coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('att', a.attname, 'acl', a.attacl::text[])), '[]'::jsonb)
                        FROM pg_attribute a
                        WHERE a.attrelid = 'pg_stat_statements'::regclass AND a.attnum > 0
                          AND NOT a.attisdropped AND a.attacl IS NOT NULL),
-           'funcs', coalesce(jsonb_agg(jsonb_build_object(
+           'funcs', coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
                       'nsp',   n.nspname,
                       'name',  p.proname,
-                      'sig',   format('%I.%I(%s)', n.nspname, p.proname,
-                                      pg_get_function_identity_arguments(p.oid)),
-                      'def',   pg_get_functiondef(p.oid),
-                      'owner', pg_get_userbyid(p.proowner),
+                      'sig',   pg_catalog.format('%I.%I(%s)', n.nspname, p.proname,
+                                      pg_catalog.pg_get_function_identity_arguments(p.oid)),
+                      'def',   pg_catalog.pg_get_functiondef(p.oid),
+                      'owner', pg_catalog.pg_get_userbyid(p.proowner),
                       'acl',   p.proacl::text[],
-                      'cmt',   obj_description(p.oid, 'pg_proc'))), '[]'::jsonb))
+                      'cmt',   pg_catalog.obj_description(p.oid, 'pg_proc'))), '[]'::jsonb))
     INTO saved
   FROM pg_proc p
   JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -42,9 +42,9 @@ BEGIN
                                        WHERE c.oid = 'pg_stat_statements'::regclass)
                     AND d.deptype = 'n');
 
-  PERFORM set_config('experdb_pgss.saved', saved::text, true);
+  PERFORM pg_catalog.set_config('experdb_pgss.saved', saved::text, true);
 
-  FOR r IN SELECT * FROM jsonb_array_elements(saved->'funcs') LOOP
+  FOR r IN SELECT * FROM pg_catalog.jsonb_array_elements(saved->'funcs') LOOP
     EXECUTE 'DROP FUNCTION ' || (r->>'sig');
   END LOOP;
 END
@@ -54,7 +54,7 @@ $pgss$;
 DROP VIEW pg_stat_statements;
 DROP FUNCTION pg_stat_statements(boolean);
 
-/* Now redefine: 1.12e1 = upstream 1.12 columns + stats_last (eXperDB) */
+/* Now redefine: upstream 1.13 columns + stats_last (eXperDB), direct from 1.12 */
 CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT userid oid,
     OUT dbid oid,
@@ -106,12 +106,14 @@ CREATE FUNCTION pg_stat_statements(IN showtext boolean,
     OUT jit_deform_time float8,
     OUT parallel_workers_to_launch int8,
     OUT parallel_workers_launched int8,
+    OUT generic_plan_calls int8,
+    OUT custom_plan_calls int8,
     OUT stats_since timestamp with time zone,
     OUT minmax_stats_since timestamp with time zone,
     OUT stats_last timestamp with time zone
 )
 RETURNS SETOF record
-AS 'MODULE_PATHNAME', 'pg_stat_statements_1_12'
+AS 'MODULE_PATHNAME', 'pg_stat_statements_1_13e1'
 LANGUAGE C STRICT VOLATILE PARALLEL SAFE;
 
 CREATE VIEW pg_stat_statements AS
@@ -121,12 +123,12 @@ GRANT SELECT ON pg_stat_statements TO PUBLIC;
 
 /* eXperDB: ALTER EXTENSION UPDATE keeps the comment the extension was created
  * with; set the one of this version so that \dx shows what is installed */
-COMMENT ON EXTENSION pg_stat_statements IS 'track planning and execution statistics of all SQL statements executed';
+COMMENT ON EXTENSION pg_stat_statements IS 'track planning and execution statistics of all SQL statements executed (eXperDB 1.13e1: +stats_last)';
 
 /* eXperDB: restore the saved functions and the view's privileges */
 DO $pgss$
 DECLARE
-  saved jsonb := current_setting('experdb_pgss.saved')::jsonb;
+  saved jsonb := pg_catalog.current_setting('experdb_pgss.saved')::jsonb;
   r     jsonb;
   g     record;
   cur   aclitem[];
@@ -138,32 +140,32 @@ BEGIN
   WHERE i.objoid = 'pg_stat_statements'::regclass AND i.classoid = 'pg_catalog.pg_class'::regclass
     AND i.objsubid = 0;
 
-  IF jsonb_typeof(saved->'view_acl') = 'array' THEN
+  IF pg_catalog.jsonb_typeof(saved->'view_acl') = 'array' THEN
     /* start from the owner alone (drop PUBLIC and anything ALTER DEFAULT PRIVILEGES added) */
     SELECT c.relacl, c.relowner INTO cur, own FROM pg_class c WHERE c.oid = 'pg_stat_statements'::regclass;
     REVOKE ALL ON pg_stat_statements FROM PUBLIC;
-    FOR g IN SELECT DISTINCT a.grantee FROM aclexplode(cur) a WHERE a.grantee NOT IN (0, own) LOOP
-      EXECUTE format('REVOKE ALL ON pg_stat_statements FROM %I', pg_get_userbyid(g.grantee));
+    FOR g IN SELECT DISTINCT a.grantee FROM pg_catalog.aclexplode(cur) a WHERE a.grantee NOT IN (0, own) LOOP
+      EXECUTE pg_catalog.format('REVOKE ALL ON pg_stat_statements FROM %I', pg_catalog.pg_get_userbyid(g.grantee));
     END LOOP;
     FOR g IN SELECT a.grantee, a.privilege_type, a.is_grantable
-             FROM aclexplode(ARRAY(SELECT jsonb_array_elements_text(saved->'view_acl'))::aclitem[]) a
+             FROM pg_catalog.aclexplode(ARRAY(SELECT pg_catalog.jsonb_array_elements_text(saved->'view_acl'))::aclitem[]) a
     LOOP
-      EXECUTE format('GRANT %s ON pg_stat_statements TO %s%s', g.privilege_type,
-                     CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(g.grantee)) END,
+      EXECUTE pg_catalog.format('GRANT %s ON pg_stat_statements TO %s%s', g.privilege_type,
+                     CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(g.grantee)) END,
                      CASE WHEN g.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
     END LOOP;
   END IF;
 
   /* column privileges, for the columns that still exist */
   FOR g IN SELECT c->>'att' AS att, a.grantee, a.privilege_type, a.is_grantable
-           FROM jsonb_array_elements(coalesce(saved->'col_acl', '[]'::jsonb)) c,
-                aclexplode(ARRAY(SELECT jsonb_array_elements_text(c->'acl'))::aclitem[]) a
+           FROM pg_catalog.jsonb_array_elements(coalesce(saved->'col_acl', '[]'::jsonb)) c,
+                pg_catalog.aclexplode(ARRAY(SELECT pg_catalog.jsonb_array_elements_text(c->'acl'))::aclitem[]) a
            WHERE EXISTS (SELECT 1 FROM pg_attribute t
                          WHERE t.attrelid = 'pg_stat_statements'::regclass AND t.attname = c->>'att'
                            AND t.attnum > 0 AND NOT t.attisdropped)
   LOOP
-    EXECUTE format('GRANT %s (%I) ON pg_stat_statements TO %s%s', g.privilege_type, g.att,
-                   CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(g.grantee)) END,
+    EXECUTE pg_catalog.format('GRANT %s (%I) ON pg_stat_statements TO %s%s', g.privilege_type, g.att,
+                   CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(g.grantee)) END,
                    CASE WHEN g.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
   END LOOP;
 
@@ -186,45 +188,45 @@ BEGIN
     WHERE objoid = 'pg_stat_statements'::regclass AND classoid = 'pg_catalog.pg_class'::regclass
       AND objsubid <> 0;
     DELETE FROM pg_catalog.pg_shdepend
-    WHERE dbid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
+    WHERE dbid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database())
       AND classid = 'pg_catalog.pg_class'::regclass AND objid = 'pg_stat_statements'::regclass
       AND deptype = 'i'
       AND (objsubid <> 0
-           OR refobjid NOT IN (SELECT a.grantee FROM aclexplode(init) a
-                               UNION SELECT a.grantor FROM aclexplode(init) a));
+           OR refobjid NOT IN (SELECT a.grantee FROM pg_catalog.aclexplode(init) a
+                               UNION SELECT a.grantor FROM pg_catalog.aclexplode(init) a));
   END IF;
 
-  FOR r IN SELECT * FROM jsonb_array_elements(saved->'funcs') LOOP
+  FOR r IN SELECT * FROM pg_catalog.jsonb_array_elements(saved->'funcs') LOOP
     EXECUTE r->>'def';
-    EXECUTE format('ALTER FUNCTION %s OWNER TO %I', r->>'sig', r->>'owner');
+    EXECUTE pg_catalog.format('ALTER FUNCTION %s OWNER TO %I', r->>'sig', r->>'owner');
 
     SELECT p.proacl, p.proowner INTO cur, own
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = r->>'nsp' AND p.proname = r->>'name'
-      AND format('%I.%I(%s)', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)) = r->>'sig';
-    IF cur IS NOT NULL OR jsonb_typeof(r->'acl') = 'array' THEN
+      AND pg_catalog.format('%I.%I(%s)', n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)) = r->>'sig';
+    IF cur IS NOT NULL OR pg_catalog.jsonb_typeof(r->'acl') = 'array' THEN
       /* start from the owner alone (drop PUBLIC and anything ALTER DEFAULT PRIVILEGES added) */
-      EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', r->>'sig');
-      FOR g IN SELECT DISTINCT a.grantee FROM aclexplode(cur) a WHERE a.grantee NOT IN (0, own) LOOP
-        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %I', r->>'sig', pg_get_userbyid(g.grantee));
+      EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', r->>'sig');
+      FOR g IN SELECT DISTINCT a.grantee FROM pg_catalog.aclexplode(cur) a WHERE a.grantee NOT IN (0, own) LOOP
+        EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION %s FROM %I', r->>'sig', pg_catalog.pg_get_userbyid(g.grantee));
       END LOOP;
-      IF jsonb_typeof(r->'acl') = 'array' THEN
+      IF pg_catalog.jsonb_typeof(r->'acl') = 'array' THEN
         FOR g IN SELECT a.grantee, a.is_grantable
-                 FROM aclexplode(ARRAY(SELECT jsonb_array_elements_text(r->'acl'))::aclitem[]) a
+                 FROM pg_catalog.aclexplode(ARRAY(SELECT pg_catalog.jsonb_array_elements_text(r->'acl'))::aclitem[]) a
                  WHERE a.privilege_type = 'EXECUTE'
         LOOP
-          EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %s%s', r->>'sig',
-                         CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(g.grantee)) END,
+          EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO %s%s', r->>'sig',
+                         CASE WHEN g.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(g.grantee)) END,
                          CASE WHEN g.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
         END LOOP;
       ELSE
         /* the function had the default privileges */
-        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO PUBLIC', r->>'sig');
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO PUBLIC', r->>'sig');
       END IF;
     END IF;
 
     IF r->>'cmt' IS NOT NULL THEN
-      EXECUTE format('COMMENT ON FUNCTION %s IS %L', r->>'sig', r->>'cmt');
+      EXECUTE pg_catalog.format('COMMENT ON FUNCTION %s IS %L', r->>'sig', r->>'cmt');
     END IF;
 
     /*
